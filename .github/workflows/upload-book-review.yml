@@ -1,0 +1,69 @@
+name: Upload article to GCS
+
+on:
+  workflow_dispatch:
+    inputs:
+      article_file:
+        description: "Markdown file name inside articles/ (example: example-review.md)"
+        required: true
+        default: "example-review.md"
+
+# Repository variable (Settings → Secrets and variables → Actions → Variables):
+#   Name:  book_review_storage
+#   Value: bucket name only, e.g. project-f40bc29e-c7cd-4098-b50-book-reviews (no gs://)
+#
+# OIDC variables:
+#   Name:  gcp_workload_identity_provider
+#   Value: projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
+#   Name:  gcp_service_account
+#   Value: SERVICE_ACCOUNT_EMAIL (example: github-actions-uploader@project-f40bc29e-c7cd-4098-b50.iam.gserviceaccount.com)
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BOOK_REVIEW_STORAGE: ${{ vars.book_review_storage }}
+      ARTICLE_FILE: ${{ github.event.inputs.article_file }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.gcp_workload_identity_provider }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.gcp_service_account }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required variables
+        run: |
+          if [ -z "$BOOK_REVIEW_STORAGE" ]; then
+            echo "::error::Set Actions variable book_review_storage to your GCS bucket name (no gs:// prefix)."
+            exit 1
+          fi
+          if [ -z "$GCP_WORKLOAD_IDENTITY_PROVIDER" ]; then
+            echo "::error::Set Actions variable gcp_workload_identity_provider."
+            exit 1
+          fi
+          if [ -z "$GCP_SERVICE_ACCOUNT" ]; then
+            echo "::error::Set Actions variable gcp_service_account."
+            exit 1
+          fi
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Check article input and file
+        run: |
+          if [ -z "$ARTICLE_FILE" ]; then
+            echo "::error::Provide an article_file workflow input (for example: example-review.md)."
+            exit 1
+          fi
+          if [ ! -f "articles/$ARTICLE_FILE" ]; then
+            echo "::error::File not found: articles/$ARTICLE_FILE"
+            exit 1
+          fi
+
+      - name: Upload article to incoming/
+        run: gcloud storage cp "articles/${ARTICLE_FILE}" "gs://${BOOK_REVIEW_STORAGE}/incoming/"
