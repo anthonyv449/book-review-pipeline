@@ -1,7 +1,7 @@
 """
-Book Review Pipeline - Cloud Function (Substack only)
+Book Review Pipeline - Cloud Function
 Triggered when a .md file is dropped into the GCS bucket.
-Parses frontmatter and publishes to Substack.
+Parses frontmatter and publishes to Substack and the personal website.
 """
 
 import functions_framework
@@ -17,6 +17,17 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ID = os.environ.get("GCP_PROJECT")
 SUBSTACK_USER_ID = 350241999
+WEBSITE_API_URL = "https://papichulofunctionapp.azurewebsites.net/api/articles/internal"
+
+
+# ── Helpers ───────────────────────────────────────────────────
+
+def slugify(title: str) -> str:
+    """Convert a title to a kebab-case slug."""
+    slug = title.lower().strip()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"[\s-]+", "-", slug)
+    return slug.strip("-")
 
 
 # ── Secret Manager ────────────────────────────────────────────
@@ -44,12 +55,16 @@ def parse_review(content: str) -> dict:
                 key, _, val = line.partition(':')
                 frontmatter[key.strip()] = val.strip().strip('"')
 
+    title = frontmatter.get("title", "Book Review")
+
     return {
-        "title": frontmatter.get("title", "Book Review"),
+        "title": title,
         "author": frontmatter.get("author", ""),
         "affiliate_link": frontmatter.get("affiliate_link", ""),
+        "affiliate_url": frontmatter.get("affiliate_url", ""),
         "pull_quote": frontmatter.get("pull_quote", ""),
         "rating": frontmatter.get("rating", ""),
+        "slug": frontmatter.get("slug", "") or slugify(title),
         "body": body,
     }
 
@@ -175,6 +190,39 @@ def post_to_substack(review: dict) -> dict:
     return {"success": True, "url": post_url}
 
 
+# ── Personal Website ──────────────────────────────────────────
+
+def post_to_website(review: dict, raw_content: str) -> dict:
+    """Post review to the personal website API. Failures are logged, not raised."""
+    api_key = get_secret("internal-api-key")
+
+    body = raw_content
+    affiliate_url = review.get("affiliate_url", "")
+    if affiliate_url:
+        body += f"\n\n---\n\n[Get this book here]({affiliate_url})"
+
+    payload = {
+        "title": review["title"],
+        "content": body,
+        "author": review["author"],
+        "slug": review["slug"],
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Internal-Key": api_key,
+    }
+
+    resp = requests.post(WEBSITE_API_URL, headers=headers, json=payload)
+
+    if not resp.ok:
+        logger.error(f"Website API failed: {resp.status_code} - {resp.text}")
+        return {"success": False, "status": resp.status_code}
+
+    logger.info("Website article posted successfully")
+    return {"success": True, "status": resp.status_code}
+
+
 # ── Main Entry Point ──────────────────────────────────────────
 
 @functions_framework.cloud_event
@@ -204,6 +252,11 @@ def process_review(cloud_event):
     except Exception as e:
         logger.error(f"Substack failed: {e}")
         raise
+
+    try:
+        post_to_website(review, review["body"])
+    except Exception as e:
+        logger.error(f"Website post failed: {e}")
 
     processed_blob = bucket.blob(file_name.replace("incoming/", "processed/"))
     bucket.copy_blob(blob, bucket, processed_blob.name)
